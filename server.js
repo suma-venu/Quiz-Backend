@@ -171,7 +171,56 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-app.get("/api/auth/profile", authenticateToken, async (req, res) => {
+
+function authorizeAdmin(req, res, next) {
+  if (req.user.role !== "ADMIN") {
+    return res.status(403).json({
+      message: "Admin access required"
+    });
+  }
+
+  next();
+}
+
+function authorizeStudent(req, res, next) {
+  if (req.user.role !== "STUDENT") {
+    return res.status(403).json({
+      message: "Student access required"
+    });
+  }
+
+  next();
+}
+
+app.get(
+  "/api/admin/dashboard",
+  authenticateToken,
+  authorizeAdmin,
+  (req, res) => {
+    res.json({
+      message: "Welcome to the Admin Dashboard",
+      user: req.user
+    });
+  }
+);
+
+app.get(
+  "/api/student/dashboard",
+  authenticateToken,
+  authorizeStudent,
+  (req, res) => {
+    res.json({
+      message: "Welcome to the Student Dashboard",
+      user: req.user
+    });
+  }
+);
+
+app.get(
+  "/api/auth/profile",
+  authenticateToken,
+  authorizeStudent,
+  async (req, res) => {
 
   try {
     const result = await pool.query(

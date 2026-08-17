@@ -193,6 +193,112 @@ function authorizeStudent(req, res, next) {
 }
 
 app.get(
+  "/api/admin/statistics",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE role = 'STUDENT')::int AS total_students,
+          COUNT(*) FILTER (
+            WHERE role = 'STUDENT' AND status = 'ACTIVE'
+          )::int AS active_students,
+          COUNT(*) FILTER (
+            WHERE role = 'STUDENT' AND status = 'INACTIVE'
+          )::int AS inactive_students,
+          COUNT(*) FILTER (WHERE role = 'ADMIN')::int AS total_admins
+        FROM users
+      `);
+
+      res.json({
+        statistics: result.rows[0]
+      });
+    } catch (error) {
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/users",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT id, name, email, role, status, created_at
+        FROM users
+        ORDER BY created_at DESC
+      `);
+
+      res.json({
+        users: result.rows
+      });
+    } catch (error) {
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
+app.patch(
+  "/api/admin/users/:id/status",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    const userId = Number(req.params.id);
+    const { status } = req.body;
+
+    if (!["ACTIVE", "INACTIVE"].includes(status)) {
+      return res.status(400).json({
+        message: "Status must be ACTIVE or INACTIVE"
+      });
+    }
+
+    if (userId === req.user.id) {
+      return res.status(400).json({
+        message: "You cannot deactivate your own account"
+      });
+    }
+
+    try {
+      const result = await pool.query(
+        `UPDATE users
+         SET status = $1
+         WHERE id = $2 AND role = 'STUDENT'
+         RETURNING id, name, email, role, status`,
+        [status, userId]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: "Student not found"
+        });
+      }
+
+      res.json({
+        message: `Student ${status.toLowerCase()} successfully`,
+        user: result.rows[0]
+      });
+    } catch (error) {
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
+app.get(
   "/api/admin/dashboard",
   authenticateToken,
   authorizeAdmin,

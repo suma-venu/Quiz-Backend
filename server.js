@@ -355,9 +355,289 @@ app.get(
   }
 });
 
+app.get(
+  "/api/admin/categories",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT id, name, description
+        FROM categories
+        ORDER BY name
+      `);
+
+      res.json({
+        categories: result.rows
+      });
+    } catch (error) {
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
+app.get(
+  "/api/admin/quizzes",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT
+          q.id,
+          q.title,
+          q.description,
+          q.category_id,
+          c.name AS category_name,
+          q.difficulty,
+          q.duration,
+          q.passing_score,
+          q.max_attempts,
+          q.status,
+          q.created_at,
+          q.updated_at
+        FROM quizzes q
+        JOIN categories c ON q.category_id = c.id
+        ORDER BY q.created_at DESC
+      `);
+
+      res.json({
+        quizzes: result.rows
+      });
+    } catch (error) {
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
+app.post(
+  "/api/admin/quizzes",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    const {
+      title,
+      description,
+      category_id,
+      difficulty,
+      duration,
+      passing_score,
+      max_attempts
+    } = req.body;
+
+    if (
+      !title ||
+      !category_id ||
+      !difficulty ||
+      !duration ||
+      passing_score === undefined ||
+      !max_attempts
+    ) {
+      return res.status(400).json({
+        message: "Please provide all required quiz fields"
+      });
+    }
+
+    try {
+      const result = await pool.query(
+        `INSERT INTO quizzes (
+          title,
+          description,
+          category_id,
+          difficulty,
+          duration,
+          passing_score,
+          max_attempts
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING *`,
+        [
+          title,
+          description,
+          category_id,
+          difficulty,
+          duration,
+          passing_score,
+          max_attempts
+        ]
+      );
+
+      res.status(201).json({
+        message: "Quiz created successfully",
+        quiz: result.rows[0]
+      });
+    } catch (error) {
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
+app.put(
+  "/api/admin/quizzes/:id",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    const quizId = Number(req.params.id);
+
+    const {
+      title,
+      description,
+      category_id,
+      difficulty,
+      duration,
+      passing_score,
+      max_attempts
+    } = req.body;
+
+    if (
+      !title ||
+      !category_id ||
+      !difficulty ||
+      !duration ||
+      passing_score === undefined ||
+      !max_attempts
+    ) {
+      return res.status(400).json({
+        message: "Please provide all required quiz fields"
+      });
+    }
+
+    try {
+      const result = await pool.query(
+        `UPDATE quizzes
+         SET title = $1,
+             description = $2,
+             category_id = $3,
+             difficulty = $4,
+             duration = $5,
+             passing_score = $6,
+             max_attempts = $7,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $8
+         RETURNING *`,
+        [
+          title,
+          description,
+          category_id,
+          difficulty,
+          duration,
+          passing_score,
+          max_attempts,
+          quizId
+        ]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: "Quiz not found"
+        });
+      }
+
+      res.json({
+        message: "Quiz updated successfully",
+        quiz: result.rows[0]
+      });
+    } catch (error) {
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
+app.delete(
+  "/api/admin/quizzes/:id",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    const quizId = Number(req.params.id);
+
+    try {
+      const result = await pool.query(
+        `DELETE FROM quizzes
+         WHERE id = $1
+         RETURNING id`,
+        [quizId]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: "Quiz not found"
+        });
+      }
+
+      res.json({
+        message: "Quiz deleted successfully"
+      });
+    } catch (error) {
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
+app.patch(
+  "/api/admin/quizzes/:id/status",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    const quizId = Number(req.params.id);
+
+    try {
+      const result = await pool.query(
+        `UPDATE quizzes
+         SET status = CASE
+           WHEN status = 'PUBLISHED' THEN 'UNPUBLISHED'
+           ELSE 'PUBLISHED'
+         END,
+         updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1
+         RETURNING *`,
+        [quizId]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: "Quiz not found"
+        });
+      }
+
+      res.json({
+        message: `Quiz ${result.rows[0].status.toLowerCase()} successfully`,
+        quiz: result.rows[0]
+      });
+    } catch (error) {
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
 app.get("/", (req, res) => {
   res.send("Quiz Management API is running");
 });
+
+
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);

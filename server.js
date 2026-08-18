@@ -633,6 +633,430 @@ app.patch(
   }
 );
 
+app.post(
+  "/api/admin/categories",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    const { name, description } = req.body;
+
+    if (!name) {
+      return res.status(400).json({
+        message: "Category name is required"
+      });
+    }
+
+    try {
+      const result = await pool.query(
+        `INSERT INTO categories (name, description)
+         VALUES ($1, $2)
+         RETURNING *`,
+        [name, description]
+      );
+
+      res.status(201).json({
+        message: "Category created successfully",
+        category: result.rows[0]
+      });
+    } catch (error) {
+      if (error.code === "23505") {
+        return res.status(409).json({
+          message: "Category name already exists"
+        });
+      }
+
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
+app.put(
+  "/api/admin/categories/:id",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    const categoryId = Number(req.params.id);
+    const { name, description } = req.body;
+
+    if (!name) {
+      return res.status(400).json({
+        message: "Category name is required"
+      });
+    }
+
+    try {
+      const result = await pool.query(
+        `UPDATE categories
+         SET name = $1, description = $2
+         WHERE id = $3
+         RETURNING *`,
+        [name, description, categoryId]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: "Category not found"
+        });
+      }
+
+      res.json({
+        message: "Category updated successfully",
+        category: result.rows[0]
+      });
+    } catch (error) {
+      if (error.code === "23505") {
+        return res.status(409).json({
+          message: "Category name already exists"
+        });
+      }
+
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
+app.delete(
+  "/api/admin/categories/:id",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    const categoryId = Number(req.params.id);
+
+    try {
+      const result = await pool.query(
+        `DELETE FROM categories
+         WHERE id = $1
+         RETURNING id`,
+        [categoryId]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: "Category not found"
+        });
+      }
+
+      res.json({
+        message: "Category deleted successfully"
+      });
+    } catch (error) {
+      if (error.code === "23503") {
+        return res.status(409).json({
+          message: "Cannot delete a category used by a quiz"
+        });
+      }
+
+      console.error(error);
+
+      res.status(500).json({
+        message: "Server error"
+      });
+    }
+  }
+);
+
+// Get all questions with their quiz and options
+app.get(
+  "/api/admin/questions",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT
+          q.id,
+          q.quiz_id,
+          qu.title AS quiz_title,
+          q.question_text,
+          q.marks,
+          q.explanation,
+          q.difficulty,
+          q.created_at,
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'id', o.id,
+                'option_text', o.option_text,
+                'is_correct', o.is_correct
+              )
+              ORDER BY o.id
+            ) FILTER (WHERE o.id IS NOT NULL),
+            '[]'::json
+          ) AS options
+        FROM questions q
+        JOIN quizzes qu ON q.quiz_id = qu.id
+        LEFT JOIN options o ON o.question_id = q.id
+        GROUP BY q.id, qu.title
+        ORDER BY q.created_at DESC
+      `);
+
+      res.json({
+        questions: result.rows,
+      });
+    } catch (error) {
+      console.error("Get questions error:", error);
+
+      res.status(500).json({
+        message: "Server error while fetching questions",
+      });
+    }
+  }
+);
+
+// Create a question with answer options
+app.post(
+  "/api/admin/questions",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    const {
+      quiz_id,
+      question_text,
+      marks,
+      explanation,
+      difficulty,
+      options,
+    } = req.body;
+
+    // Validate the question details
+    if (!quiz_id || !question_text?.trim() || !difficulty) {
+      return res.status(400).json({
+        message: "Quiz, question text and difficulty are required",
+      });
+    }
+
+    // Remove options containing only empty spaces
+    const validOptions = Array.isArray(options)
+      ? options.filter((option) => option.option_text?.trim())
+      : [];
+
+    if (validOptions.length < 2) {
+      return res.status(400).json({
+        message: "A question must have at least two options",
+      });
+    }
+
+    const correctOptions = validOptions.filter(
+      (option) => option.is_correct === true
+    );
+
+    if (correctOptions.length !== 1) {
+      return res.status(400).json({
+        message: "Select exactly one correct answer",
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const questionResult = await client.query(
+        `INSERT INTO questions
+          (quiz_id, question_text, marks, explanation, difficulty)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING *`,
+        [
+          quiz_id,
+          question_text.trim(),
+          marks || 1,
+          explanation?.trim() || null,
+          difficulty,
+        ]
+      );
+
+      const question = questionResult.rows[0];
+
+      for (const option of validOptions) {
+        await client.query(
+          `INSERT INTO options
+            (question_id, option_text, is_correct)
+           VALUES ($1, $2, $3)`,
+          [
+            question.id,
+            option.option_text.trim(),
+            option.is_correct === true,
+          ]
+        );
+      }
+
+      await client.query("COMMIT");
+
+      res.status(201).json({
+        message: "Question created successfully",
+        question,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      console.error("Create question error:", error);
+
+      res.status(500).json({
+        message: "Server error while creating question",
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// Update a question and its options
+app.put(
+  "/api/admin/questions/:id",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    const { id } = req.params;
+
+    const {
+      quiz_id,
+      question_text,
+      marks,
+      explanation,
+      difficulty,
+      options,
+    } = req.body;
+
+    if (!quiz_id || !question_text?.trim() || !difficulty) {
+      return res.status(400).json({
+        message: "Quiz, question text and difficulty are required",
+      });
+    }
+
+    const validOptions = Array.isArray(options)
+      ? options.filter((option) => option.option_text?.trim())
+      : [];
+
+    if (validOptions.length < 2) {
+      return res.status(400).json({
+        message: "A question must have at least two options",
+      });
+    }
+
+    const correctOptions = validOptions.filter(
+      (option) => option.is_correct === true
+    );
+
+    if (correctOptions.length !== 1) {
+      return res.status(400).json({
+        message: "Select exactly one correct answer",
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const questionResult = await client.query(
+        `UPDATE questions
+         SET quiz_id = $1,
+             question_text = $2,
+             marks = $3,
+             explanation = $4,
+             difficulty = $5
+         WHERE id = $6
+         RETURNING *`,
+        [
+          quiz_id,
+          question_text.trim(),
+          marks || 1,
+          explanation?.trim() || null,
+          difficulty,
+          id,
+        ]
+      );
+
+      if (questionResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+
+        return res.status(404).json({
+          message: "Question not found",
+        });
+      }
+
+      // Remove the previous options
+      await client.query(
+        "DELETE FROM options WHERE question_id = $1",
+        [id]
+      );
+
+      // Insert the updated options
+      for (const option of validOptions) {
+        await client.query(
+          `INSERT INTO options
+            (question_id, option_text, is_correct)
+           VALUES ($1, $2, $3)`,
+          [
+            id,
+            option.option_text.trim(),
+            option.is_correct === true,
+          ]
+        );
+      }
+
+      await client.query("COMMIT");
+
+      res.json({
+        message: "Question updated successfully",
+        question: questionResult.rows[0],
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      console.error("Update question error:", error);
+
+      res.status(500).json({
+        message: "Server error while updating question",
+      });
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// Delete a question
+app.delete(
+  "/api/admin/questions/:id",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    const { id } = req.params;
+
+    try {
+      const result = await pool.query(
+        `DELETE FROM questions
+         WHERE id = $1
+         RETURNING id`,
+        [id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: "Question not found",
+        });
+      }
+
+      res.json({
+        message: "Question deleted successfully",
+      });
+    } catch (error) {
+      console.error("Delete question error:", error);
+
+      res.status(500).json({
+        message: "Server error while deleting question",
+      });
+    }
+  }
+);
+
+
 app.get("/", (req, res) => {
   res.send("Quiz Management API is running");
 });

@@ -1510,6 +1510,137 @@ app.post(
   }
 );
 
+// Get one completed attempt with answer review
+app.get(
+  "/api/student/attempts/:attemptId/result",
+  authenticateToken,
+  authorizeStudent,
+  async (req, res) => {
+    const { attemptId } = req.params;
+    const userId = req.user.id;
+
+    try {
+      const attemptResult = await pool.query(
+        `SELECT
+           a.id AS attempt_id,
+           a.quiz_id,
+           q.title AS quiz_title,
+           q.passing_score,
+           a.score,
+           a.percentage,
+           a.correct_answers,
+           a.incorrect_answers,
+           a.unanswered,
+           a.time_taken,
+           a.started_at,
+           a.completed_at,
+           CASE
+             WHEN a.percentage >= q.passing_score THEN 'PASS'
+             ELSE 'FAIL'
+           END AS result_status,
+           COALESCE(SUM(questions.marks), 0)::INTEGER AS total_marks
+         FROM attempts a
+         JOIN quizzes q ON q.id = a.quiz_id
+         LEFT JOIN questions ON questions.quiz_id = q.id
+         WHERE a.id = $1
+           AND a.user_id = $2
+           AND a.status = 'COMPLETED'
+         GROUP BY a.id, q.id`,
+        [attemptId, userId]
+      );
+
+      if (attemptResult.rows.length === 0) {
+        return res.status(404).json({
+          message: "Completed quiz result not found",
+        });
+      }
+
+      const reviewResult = await pool.query(
+        `SELECT
+           q.id AS question_id,
+           q.question_text,
+           q.explanation,
+           q.marks,
+           a.selected_option_id,
+           a.is_correct,
+           selected_option.option_text AS selected_option_text,
+           correct_option.id AS correct_option_id,
+           correct_option.option_text AS correct_option_text
+         FROM questions q
+         LEFT JOIN answers a
+           ON a.question_id = q.id
+          AND a.attempt_id = $1
+         LEFT JOIN options selected_option
+           ON selected_option.id = a.selected_option_id
+         JOIN options correct_option
+           ON correct_option.question_id = q.id
+          AND correct_option.is_correct = TRUE
+         WHERE q.quiz_id = $2
+         ORDER BY q.id`,
+        [attemptId, attemptResult.rows[0].quiz_id]
+      );
+
+      res.json({
+        result: attemptResult.rows[0],
+        review: reviewResult.rows,
+      });
+    } catch (error) {
+      console.error("Get result error:", error);
+
+      res.status(500).json({
+        message: "Server error while fetching the result",
+      });
+    }
+  }
+);
+
+// Get the logged-in student's completed attempt history
+app.get(
+  "/api/student/attempts",
+  authenticateToken,
+  authorizeStudent,
+  async (req, res) => {
+    try {
+      const result = await pool.query(
+        `SELECT
+           a.id AS attempt_id,
+           a.quiz_id,
+           q.title AS quiz_title,
+           c.name AS category_name,
+           a.score,
+           a.percentage,
+           a.correct_answers,
+           a.incorrect_answers,
+           a.unanswered,
+           a.time_taken,
+           a.started_at,
+           a.completed_at,
+           CASE
+             WHEN a.percentage >= q.passing_score THEN 'PASS'
+             ELSE 'FAIL'
+           END AS result_status
+         FROM attempts a
+         JOIN quizzes q ON q.id = a.quiz_id
+         JOIN categories c ON c.id = q.category_id
+         WHERE a.user_id = $1
+           AND a.status = 'COMPLETED'
+         ORDER BY a.completed_at DESC`,
+        [req.user.id]
+      );
+
+      res.json({
+        attempts: result.rows,
+      });
+    } catch (error) {
+      console.error("Get attempt history error:", error);
+
+      res.status(500).json({
+        message: "Server error while fetching attempt history",
+      });
+    }
+  }
+);
+
 
 app.get("/", (req, res) => {
   res.send("Quiz Management API is running");

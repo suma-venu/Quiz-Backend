@@ -1056,6 +1056,244 @@ app.delete(
   }
 );
 
+// Get published quizzes for students
+app.get(
+  "/api/student/quizzes",
+  authenticateToken,
+  authorizeStudent,
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT
+          q.id,
+          q.title,
+          q.description,
+          q.difficulty,
+          q.duration,
+          q.passing_score,
+          q.max_attempts,
+          q.status,
+          c.name AS category_name,
+          COUNT(questions.id)::INTEGER AS question_count
+        FROM quizzes q
+        JOIN categories c ON c.id = q.category_id
+        LEFT JOIN questions ON questions.quiz_id = q.id
+        WHERE q.status = 'PUBLISHED'
+        GROUP BY q.id, c.name
+        ORDER BY q.created_at DESC
+      `);
+
+      res.json({
+        quizzes: result.rows,
+      });
+    } catch (error) {
+      console.error("Get student quizzes error:", error);
+
+      res.status(500).json({
+        message: "Server error while fetching quizzes",
+      });
+    }
+  }
+);
+
+// Get details of one published quiz
+app.get(
+  "/api/student/quizzes/:id",
+  authenticateToken,
+  authorizeStudent,
+  async (req, res) => {
+    const { id } = req.params;
+
+    try {
+      const result = await pool.query(
+        `SELECT
+           q.id,
+           q.title,
+           q.description,
+           q.difficulty,
+           q.duration,
+           q.passing_score,
+           q.max_attempts,
+           q.status,
+           c.name AS category_name,
+           COUNT(questions.id)::INTEGER AS question_count
+         FROM quizzes q
+         JOIN categories c ON c.id = q.category_id
+         LEFT JOIN questions ON questions.quiz_id = q.id
+         WHERE q.id = $1
+           AND q.status = 'PUBLISHED'
+         GROUP BY q.id, c.name`,
+        [id]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({
+          message: "Published quiz not found",
+        });
+      }
+
+      const attemptResult = await pool.query(
+        `SELECT COUNT(*)::INTEGER AS attempt_count
+         FROM attempts
+         WHERE quiz_id = $1
+           AND user_id = $2`,
+        [id, req.user.id]
+      );
+
+      res.json({
+        quiz: {
+          ...result.rows[0],
+          attempt_count: attemptResult.rows[0].attempt_count,
+        },
+      });
+    } catch (error) {
+      console.error("Get quiz details error:", error);
+
+      res.status(500).json({
+        message: "Server error while fetching quiz details",
+      });
+    }
+  }
+);
+
+// Start a quiz attempt
+app.post(
+  "/api/student/quizzes/:id/start",
+  authenticateToken,
+  authorizeStudent,
+  async (req, res) => {
+    const quizId = req.params.id;
+    const userId = req.user.id;
+
+    try {
+      const quizResult = await pool.query(
+        `SELECT id, title, duration, max_attempts
+         FROM quizzes
+         WHERE id = $1
+           AND status = 'PUBLISHED'`,
+        [quizId]
+      );
+
+      if (quizResult.rows.length === 0) {
+        return res.status(404).json({
+          message: "Published quiz not found",
+        });
+      }
+
+      const quiz = quizResult.rows[0];
+const questionCountResult = await pool.query(
+  `SELECT COUNT(*)::INTEGER AS question_count
+   FROM questions
+   WHERE quiz_id = $1`,
+  [quizId]
+);
+
+if (questionCountResult.rows[0].question_count === 0) {
+  return res.status(400).json({
+    message: "This quiz does not contain any questions",
+  });
+}
+
+
+
+      // Continue an attempt that is already in progress
+      let attemptResult = await pool.query(
+        `SELECT id, started_at, status
+         FROM attempts
+         WHERE quiz_id = $1
+           AND user_id = $2
+           AND status = 'IN_PROGRESS'
+         ORDER BY started_at DESC
+         LIMIT 1`,
+        [quizId, userId]
+      );
+
+      let attempt;
+
+      if (attemptResult.rows.length > 0) {
+        attempt = attemptResult.rows[0];
+      } else {
+        const countResult = await pool.query(
+          `SELECT COUNT(*)::INTEGER AS attempt_count
+           FROM attempts
+           WHERE quiz_id = $1
+             AND user_id = $2`,
+          [quizId, userId]
+        );
+
+        if (countResult.rows[0].attempt_count >= quiz.max_attempts) {
+          return res.status(403).json({
+            message: "Maximum quiz attempts reached",
+          });
+        }
+
+        attemptResult = await pool.query(
+          `INSERT INTO attempts (quiz_id, user_id)
+           VALUES ($1, $2)
+           RETURNING id, started_at, status`,
+          [quizId, userId]
+        );
+
+        attempt = attemptResult.rows[0];
+      }
+
+      const questionsResult = await pool.query(
+        `SELECT
+           q.id,
+           q.question_text,
+           q.marks,
+           q.difficulty,
+           COALESCE(
+             json_agg(
+               json_build_object(
+                 'id', o.id,
+                 'option_text', o.option_text
+               )
+               ORDER BY o.id
+             ) FILTER (WHERE o.id IS NOT NULL),
+             '[]'::json
+           ) AS options
+         FROM questions q
+         LEFT JOIN options o ON o.question_id = q.id
+         WHERE q.quiz_id = $1
+         GROUP BY q.id
+         ORDER BY q.id`,
+        [quizId]
+      );
+
+      if (questionsResult.rows.length === 0) {
+        return res.status(400).json({
+          message: "This quiz does not contain any questions",
+        });
+      }
+
+      const expiresAt = new Date(
+  new Date(attempt.started_at).getTime() +
+    Number(quiz.duration) * 60 * 1000
+).toISOString();
+
+attempt.expires_at = expiresAt;
+
+      res.status(201).json({
+        message: "Quiz attempt started",
+        quiz: {
+          id: quiz.id,
+          title: quiz.title,
+          duration: quiz.duration,
+        },
+        attempt,
+        questions: questionsResult.rows,
+      });
+    } catch (error) {
+      console.error("Start quiz error:", error);
+
+      res.status(500).json({
+        message: "Server error while starting quiz",
+      });
+    }
+  }
+);
+
 
 app.get("/", (req, res) => {
   res.send("Quiz Management API is running");

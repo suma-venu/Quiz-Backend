@@ -13,7 +13,6 @@ app.use(cors({
 }));
 
 app.use(express.json());
-app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
 
@@ -1290,6 +1289,223 @@ attempt.expires_at = expiresAt;
       res.status(500).json({
         message: "Server error while starting quiz",
       });
+    }
+  }
+);
+
+// Submit a quiz attempt and calculate the result
+app.post(
+  "/api/student/attempts/:attemptId/submit",
+  authenticateToken,
+  authorizeStudent,
+  async (req, res) => {
+    const { attemptId } = req.params;
+    const { answers = [] } = req.body;
+    const userId = req.user.id;
+
+    if (!Array.isArray(answers)) {
+      return res.status(400).json({
+        message: "Answers must be provided as an array",
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const attemptResult = await client.query(
+        `SELECT
+           a.id,
+           a.quiz_id,
+           a.status,
+           a.started_at,
+           q.title AS quiz_title,
+           q.duration,
+           q.passing_score
+         FROM attempts a
+         JOIN quizzes q ON q.id = a.quiz_id
+         WHERE a.id = $1
+           AND a.user_id = $2
+         FOR UPDATE`,
+        [attemptId, userId]
+      );
+
+      if (attemptResult.rows.length === 0) {
+        await client.query("ROLLBACK");
+
+        return res.status(404).json({
+          message: "Quiz attempt not found",
+        });
+      }
+
+      const attempt = attemptResult.rows[0];
+
+      if (attempt.status === "COMPLETED") {
+        await client.query("ROLLBACK");
+
+        return res.status(400).json({
+          message: "This quiz attempt has already been submitted",
+        });
+      }
+
+      const questionsResult = await client.query(
+        `SELECT
+           q.id AS question_id,
+           q.marks,
+           json_agg(
+             json_build_object(
+               'id', o.id,
+               'is_correct', o.is_correct
+             )
+             ORDER BY o.id
+           ) AS options
+         FROM questions q
+         JOIN options o ON o.question_id = q.id
+         WHERE q.quiz_id = $1
+         GROUP BY q.id
+         ORDER BY q.id`,
+        [attempt.quiz_id]
+      );
+
+      const submittedAnswers = new Map(
+        answers.map((answer) => [
+          Number(answer.question_id),
+          answer.selected_option_id === null ||
+          answer.selected_option_id === undefined
+            ? null
+            : Number(answer.selected_option_id),
+        ])
+      );
+
+      let score = 0;
+      let totalMarks = 0;
+      let correctAnswers = 0;
+      let incorrectAnswers = 0;
+      let unanswered = 0;
+
+      await client.query(
+        "DELETE FROM answers WHERE attempt_id = $1",
+        [attemptId]
+      );
+
+      for (const question of questionsResult.rows) {
+        const questionId = Number(question.question_id);
+        const questionMarks = Number(question.marks);
+        const selectedOptionId =
+          submittedAnswers.get(questionId) ?? null;
+
+        totalMarks += questionMarks;
+
+        if (selectedOptionId === null) {
+          unanswered += 1;
+
+          await client.query(
+            `INSERT INTO answers
+              (attempt_id, question_id, selected_option_id, is_correct)
+             VALUES ($1, $2, NULL, NULL)`,
+            [attemptId, questionId]
+          );
+
+          continue;
+        }
+
+        const selectedOption = question.options.find(
+          (option) => Number(option.id) === selectedOptionId
+        );
+
+        if (!selectedOption) {
+          await client.query("ROLLBACK");
+
+          return res.status(400).json({
+            message: `Invalid option selected for question ${questionId}`,
+          });
+        }
+
+        const isCorrect = selectedOption.is_correct === true;
+
+        if (isCorrect) {
+          correctAnswers += 1;
+          score += questionMarks;
+        } else {
+          incorrectAnswers += 1;
+        }
+
+        await client.query(
+          `INSERT INTO answers
+            (attempt_id, question_id, selected_option_id, is_correct)
+           VALUES ($1, $2, $3, $4)`,
+          [attemptId, questionId, selectedOptionId, isCorrect]
+        );
+      }
+
+      const percentage =
+        totalMarks > 0
+          ? Number(((score / totalMarks) * 100).toFixed(2))
+          : 0;
+
+      const result =
+        percentage >= Number(attempt.passing_score)
+          ? "PASS"
+          : "FAIL";
+
+      const elapsedSeconds = Math.floor(
+        (Date.now() - new Date(attempt.started_at).getTime()) / 1000
+      );
+
+      const timeTaken = Math.min(
+        Math.max(elapsedSeconds, 0),
+        Number(attempt.duration) * 60
+      );
+
+      await client.query(
+        `UPDATE attempts
+         SET score = $1,
+             percentage = $2,
+             correct_answers = $3,
+             incorrect_answers = $4,
+             unanswered = $5,
+             time_taken = $6,
+             status = 'COMPLETED',
+             completed_at = CURRENT_TIMESTAMP
+         WHERE id = $7`,
+        [
+          score,
+          percentage,
+          correctAnswers,
+          incorrectAnswers,
+          unanswered,
+          timeTaken,
+          attemptId,
+        ]
+      );
+
+      await client.query("COMMIT");
+
+      res.json({
+        message: "Quiz submitted successfully",
+        result: {
+          attempt_id: Number(attemptId),
+          quiz_title: attempt.quiz_title,
+          score,
+          total_marks: totalMarks,
+          percentage,
+          correct_answers: correctAnswers,
+          incorrect_answers: incorrectAnswers,
+          unanswered,
+          time_taken: timeTaken,
+          status: result,
+        },
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      console.error("Submit quiz error:", error);
+
+      res.status(500).json({
+        message: "Server error while submitting quiz",
+      });
+    } finally {
+      client.release();
     }
   }
 );

@@ -1835,6 +1835,157 @@ app.get(
   }
 );
 
+// Get overall leaderboard using each student's best score per quiz
+app.get(
+  "/api/leaderboard/overall",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        WITH best_quiz_scores AS (
+          SELECT
+            user_id,
+            quiz_id,
+            MAX(percentage) AS best_score
+          FROM attempts
+          WHERE status = 'COMPLETED'
+          GROUP BY user_id, quiz_id
+        ),
+        student_scores AS (
+          SELECT
+            users.id AS user_id,
+            users.name,
+            ROUND(AVG(best_quiz_scores.best_score), 2) AS average_score,
+            COUNT(best_quiz_scores.quiz_id)::INTEGER AS quizzes_completed
+          FROM best_quiz_scores
+          JOIN users ON users.id = best_quiz_scores.user_id
+          WHERE users.role = 'STUDENT'
+            AND users.status = 'ACTIVE'
+          GROUP BY users.id, users.name
+        )
+        SELECT
+          RANK() OVER (
+            ORDER BY average_score DESC, quizzes_completed DESC
+          )::INTEGER AS rank,
+          user_id,
+          name,
+          average_score,
+          quizzes_completed
+        FROM student_scores
+        ORDER BY rank, name
+        LIMIT 100
+      `);
+
+      res.json({
+        leaderboard: result.rows,
+      });
+    } catch (error) {
+      console.error("Get overall leaderboard error:", error);
+
+      res.status(500).json({
+        message: "Server error while fetching the leaderboard",
+      });
+    }
+  }
+);
+
+// Get categories used by the category leaderboard
+app.get(
+  "/api/leaderboard/categories",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT id, name
+        FROM categories
+        ORDER BY name
+      `);
+
+      res.json({
+        categories: result.rows,
+      });
+    } catch (error) {
+      console.error("Get leaderboard categories error:", error);
+
+      res.status(500).json({
+        message: "Server error while fetching categories",
+      });
+    }
+  }
+);
+
+// Get leaderboard for one quiz category
+app.get(
+  "/api/leaderboard/category/:categoryId",
+  authenticateToken,
+  async (req, res) => {
+    const { categoryId } = req.params;
+
+    try {
+      const categoryResult = await pool.query(
+        `SELECT id, name FROM categories WHERE id = $1`,
+        [categoryId]
+      );
+
+      if (categoryResult.rows.length === 0) {
+        return res.status(404).json({
+          message: "Category not found",
+        });
+      }
+
+      const result = await pool.query(
+        `WITH best_quiz_scores AS (
+           SELECT
+             attempts.user_id,
+             attempts.quiz_id,
+             MAX(attempts.percentage) AS best_score
+           FROM attempts
+           JOIN quizzes ON quizzes.id = attempts.quiz_id
+           WHERE attempts.status = 'COMPLETED'
+             AND quizzes.category_id = $1
+           GROUP BY attempts.user_id, attempts.quiz_id
+         ),
+         student_scores AS (
+           SELECT
+             users.id AS user_id,
+             users.name,
+             ROUND(AVG(best_quiz_scores.best_score), 2) AS average_score,
+             COUNT(best_quiz_scores.quiz_id)::INTEGER
+               AS quizzes_completed
+           FROM best_quiz_scores
+           JOIN users ON users.id = best_quiz_scores.user_id
+           WHERE users.role = 'STUDENT'
+             AND users.status = 'ACTIVE'
+           GROUP BY users.id, users.name
+         )
+         SELECT
+           RANK() OVER (
+             ORDER BY average_score DESC, quizzes_completed DESC
+           )::INTEGER AS rank,
+           user_id,
+           name,
+           average_score,
+           quizzes_completed
+         FROM student_scores
+         ORDER BY rank, name
+         LIMIT 100`,
+        [categoryId]
+      );
+
+      res.json({
+        category: categoryResult.rows[0],
+        leaderboard: result.rows,
+      });
+    } catch (error) {
+      console.error("Get category leaderboard error:", error);
+
+      res.status(500).json({
+        message: "Server error while fetching category leaderboard",
+      });
+    }
+  }
+);
+
 
 app.get("/", (req, res) => {
   res.send("Quiz Management API is running");

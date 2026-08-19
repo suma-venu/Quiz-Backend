@@ -2044,6 +2044,56 @@ app.get(
   }
 );
 
+// Get all completed quiz results for administrators
+app.get(
+  "/api/admin/results",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT
+          attempts.id AS attempt_id,
+          users.id AS user_id,
+          users.name AS student_name,
+          users.email AS student_email,
+          quizzes.id AS quiz_id,
+          quizzes.title AS quiz_title,
+          categories.name AS category_name,
+          attempts.score,
+          attempts.percentage,
+          attempts.correct_answers,
+          attempts.incorrect_answers,
+          attempts.unanswered,
+          attempts.time_taken,
+          attempts.started_at,
+          attempts.completed_at,
+          CASE
+            WHEN attempts.percentage >= quizzes.passing_score
+              THEN 'PASS'
+            ELSE 'FAIL'
+          END AS result_status
+        FROM attempts
+        JOIN users ON users.id = attempts.user_id
+        JOIN quizzes ON quizzes.id = attempts.quiz_id
+        JOIN categories ON categories.id = quizzes.category_id
+        WHERE attempts.status = 'COMPLETED'
+        ORDER BY attempts.completed_at DESC
+      `);
+
+      res.json({
+        results: result.rows,
+      });
+    } catch (error) {
+      console.error("Get admin results error:", error);
+
+      res.status(500).json({
+        message: "Server error while fetching quiz results",
+      });
+    }
+  }
+);
+
 
 app.get("/", (req, res) => {
   res.send("Quiz Management API is running");

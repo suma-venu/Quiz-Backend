@@ -5,14 +5,49 @@ const express = require("express");
 const { Pool } = require("pg");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const app = express();
 
+if (!process.env.DATABASE_URL || !process.env.JWT_SECRET) {
+  throw new Error(
+    "DATABASE_URL and JWT_SECRET must be configured in the environment"
+  );
+}
 
-app.use(cors({
-  origin: "http://localhost:5173"
-}));
+const allowedOrigins = [
+  "http://localhost:5173",
+  process.env.FRONTEND_URL,
+].filter(Boolean);
 
-app.use(express.json());
+app.use(helmet());
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error("Origin not allowed by CORS"));
+    },
+  })
+);
+
+app.use(express.json({ limit: "10kb" }));
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    message: "Too many authentication requests. Please try again later.",
+  },
+});
+
+app.use("/api/auth", authLimiter);
 
 const PORT = process.env.PORT || 5000;
 
@@ -55,10 +90,32 @@ pool.query("SELECT NOW()")
   app.post("/api/auth/register", async (req, res) => {
 
   const { name, email, password } = req.body;
+  const normalizedName = name?.trim();
+  const normalizedEmail = email?.trim().toLowerCase();
 
-  if (!name || !email || !password) {
+  if (!normalizedName || !normalizedEmail || !password) {
     return res.status(400).json({
       message: "Name, email and password are required"
+    });
+  }
+
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  if (!emailPattern.test(normalizedEmail)) {
+    return res.status(400).json({
+      message: "Please enter a valid email address"
+    });
+  }
+
+  if (password.length < 6) {
+    return res.status(400).json({
+      message: "Password must contain at least 6 characters"
+    });
+  }
+
+  if (normalizedName.length > 100 || normalizedEmail.length > 255) {
+    return res.status(400).json({
+      message: "Name or email exceeds the allowed length"
     });
   }
 
@@ -66,7 +123,7 @@ pool.query("SELECT NOW()")
 
     const existingUser = await pool.query(
   "SELECT id FROM users WHERE email = $1",
-  [email]
+  [normalizedEmail]
 );
 
 if (existingUser.rows.length > 0) {
@@ -80,7 +137,7 @@ if (existingUser.rows.length > 0) {
     `INSERT INTO users (name, email, password)
      VALUES ($1, $2, $3)
      RETURNING id, name, email, role, status, created_at`,
-    [name, email, hashedPassword]
+    [normalizedName, normalizedEmail, hashedPassword]
   );
 
   res.status(201).json({
@@ -101,8 +158,9 @@ if (existingUser.rows.length > 0) {
 app.post("/api/auth/login", async (req, res) => {
 
   const { email, password } = req.body;
+  const normalizedEmail = email?.trim().toLowerCase();
 
-  if (!email || !password) {
+  if (!normalizedEmail || !password) {
     return res.status(400).json({
       message: "Email and password are required"
     });
@@ -111,7 +169,7 @@ app.post("/api/auth/login", async (req, res) => {
   try {
     const result = await pool.query(
       "SELECT * FROM users WHERE email = $1",
-      [email]
+      [normalizedEmail]
     );
 
     if (result.rows.length === 0) {

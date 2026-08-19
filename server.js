@@ -1641,6 +1641,66 @@ app.get(
   }
 );
 
+// Get statistics and recent performance for the student dashboard
+app.get(
+  "/api/student/statistics",
+  authenticateToken,
+  authorizeStudent,
+  async (req, res) => {
+    try {
+      const statisticsResult = await pool.query(
+        `SELECT
+           COUNT(*)::INTEGER AS total_attempts,
+           COUNT(DISTINCT quiz_id)::INTEGER AS quizzes_completed,
+           COALESCE(ROUND(AVG(percentage), 2), 0) AS average_score,
+           COALESCE(MAX(percentage), 0) AS best_score,
+           COUNT(*) FILTER (
+             WHERE percentage >= quizzes.passing_score
+           )::INTEGER AS passed_attempts,
+           COUNT(*) FILTER (
+             WHERE percentage < quizzes.passing_score
+           )::INTEGER AS failed_attempts
+         FROM attempts
+         JOIN quizzes ON quizzes.id = attempts.quiz_id
+         WHERE attempts.user_id = $1
+           AND attempts.status = 'COMPLETED'`,
+        [req.user.id]
+      );
+
+      const performanceResult = await pool.query(
+        `SELECT
+           attempts.id AS attempt_id,
+           quizzes.title AS quiz_title,
+           attempts.percentage,
+           attempts.completed_at,
+           CASE
+             WHEN attempts.percentage >= quizzes.passing_score
+               THEN 'PASS'
+             ELSE 'FAIL'
+           END AS result_status
+         FROM attempts
+         JOIN quizzes ON quizzes.id = attempts.quiz_id
+         WHERE attempts.user_id = $1
+           AND attempts.status = 'COMPLETED'
+         ORDER BY attempts.completed_at DESC
+         LIMIT 7`,
+        [req.user.id]
+      );
+
+      res.json({
+        statistics: statisticsResult.rows[0],
+        recent_performance: performanceResult.rows.reverse(),
+      });
+    } catch (error) {
+      console.error("Get student statistics error:", error);
+
+      res.status(500).json({
+        message: "Server error while fetching student statistics",
+      });
+    }
+  }
+);
+
 
 app.get("/", (req, res) => {
   res.send("Quiz Management API is running");

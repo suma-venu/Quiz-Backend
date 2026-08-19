@@ -1701,6 +1701,140 @@ app.get(
   }
 );
 
+// Get platform analytics for administrators
+app.get(
+  "/api/admin/analytics",
+  authenticateToken,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const [
+        studentResult,
+        quizResult,
+        attemptResult,
+        quizPerformanceResult,
+      ] = await Promise.all([
+        pool.query(`
+          SELECT
+            COUNT(*) FILTER (WHERE role = 'STUDENT')::INTEGER
+              AS total_students,
+            COUNT(*) FILTER (
+              WHERE role = 'STUDENT' AND status = 'ACTIVE'
+            )::INTEGER AS active_students,
+            COUNT(*) FILTER (
+              WHERE role = 'STUDENT' AND status = 'INACTIVE'
+            )::INTEGER AS inactive_students
+          FROM users
+        `),
+
+        pool.query(`
+          SELECT
+            COUNT(*)::INTEGER AS total_quizzes,
+            COUNT(*) FILTER (
+              WHERE status = 'PUBLISHED'
+            )::INTEGER AS published_quizzes,
+            COUNT(*) FILTER (
+              WHERE status = 'UNPUBLISHED'
+            )::INTEGER AS unpublished_quizzes,
+            (SELECT COUNT(*)::INTEGER FROM questions)
+              AS total_questions
+          FROM quizzes
+        `),
+
+        pool.query(`
+          SELECT
+            COUNT(*)::INTEGER AS total_attempts,
+            COUNT(*) FILTER (
+              WHERE attempts.status = 'COMPLETED'
+            )::INTEGER AS completed_attempts,
+            COUNT(*) FILTER (
+              WHERE attempts.status = 'IN_PROGRESS'
+            )::INTEGER AS in_progress_attempts,
+            COUNT(DISTINCT attempts.user_id)::INTEGER
+              AS participating_students,
+            COALESCE(
+              ROUND(
+                AVG(attempts.percentage) FILTER (
+                  WHERE attempts.status = 'COMPLETED'
+                ),
+                2
+              ),
+              0
+            ) AS average_score,
+            COUNT(*) FILTER (
+              WHERE attempts.status = 'COMPLETED'
+                AND attempts.percentage >= quizzes.passing_score
+            )::INTEGER AS passed_attempts,
+            COUNT(*) FILTER (
+              WHERE attempts.status = 'COMPLETED'
+                AND attempts.percentage < quizzes.passing_score
+            )::INTEGER AS failed_attempts
+          FROM attempts
+          JOIN quizzes ON quizzes.id = attempts.quiz_id
+        `),
+
+        pool.query(`
+          SELECT
+            quizzes.id AS quiz_id,
+            quizzes.title AS quiz_title,
+            categories.name AS category_name,
+            COUNT(attempts.id) FILTER (
+              WHERE attempts.status = 'COMPLETED'
+            )::INTEGER AS completed_attempts,
+            COALESCE(
+              ROUND(
+                AVG(attempts.percentage) FILTER (
+                  WHERE attempts.status = 'COMPLETED'
+                ),
+                2
+              ),
+              0
+            ) AS average_score,
+            COUNT(attempts.id) FILTER (
+              WHERE attempts.status = 'COMPLETED'
+                AND attempts.percentage >= quizzes.passing_score
+            )::INTEGER AS passed_attempts,
+            COUNT(attempts.id) FILTER (
+              WHERE attempts.status = 'COMPLETED'
+                AND attempts.percentage < quizzes.passing_score
+            )::INTEGER AS failed_attempts
+          FROM quizzes
+          JOIN categories ON categories.id = quizzes.category_id
+          LEFT JOIN attempts ON attempts.quiz_id = quizzes.id
+          GROUP BY quizzes.id, categories.name
+          ORDER BY completed_attempts DESC, quizzes.title
+        `),
+      ]);
+
+      const attemptStatistics = attemptResult.rows[0];
+      const completedAttempts = Number(
+        attemptStatistics.completed_attempts
+      );
+      const passedAttempts = Number(attemptStatistics.passed_attempts);
+
+      const passRate = completedAttempts
+        ? Number(((passedAttempts / completedAttempts) * 100).toFixed(2))
+        : 0;
+
+      res.json({
+        student_statistics: studentResult.rows[0],
+        quiz_statistics: quizResult.rows[0],
+        attempt_statistics: {
+          ...attemptStatistics,
+          pass_rate: passRate,
+        },
+        quiz_performance: quizPerformanceResult.rows,
+      });
+    } catch (error) {
+      console.error("Get admin analytics error:", error);
+
+      res.status(500).json({
+        message: "Server error while fetching admin analytics",
+      });
+    }
+  }
+);
+
 
 app.get("/", (req, res) => {
   res.send("Quiz Management API is running");
